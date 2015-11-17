@@ -395,14 +395,26 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 			log.Printf("[DEBUG] %#v", v.Network)
 			networkInterface := make(map[string]interface{})
 			networkInterface["label"] = v.Network
+			log.Printf("[DEBUG] all ipaddress %v", v.IpAddress)
 			if len(v.IpAddress) > 0 {
-				log.Printf("[DEBUG] %#v", v.IpAddress[0])
+				log.Printf("[DEBUG] first ipaddress %#v", v.IpAddress[0])
 				networkInterface["ip_address"] = v.IpAddress[0]
-
-				m := net.CIDRMask(v.IpConfig.IpAddress[0].PrefixLength, 32)
-				subnetMask := net.IPv4(m[0], m[1], m[2], m[3])
-				networkInterface["subnet_mask"] = subnetMask.String()
-				log.Printf("[DEBUG] %#v", subnetMask.String())
+				testInput := net.ParseIP(v.IpAddress[0])
+				if testInput.To4() != nil {
+					m := net.CIDRMask(v.IpConfig.IpAddress[0].PrefixLength, 32)
+					subnetMask := net.IPv4(m[0], m[1], m[2], m[3])
+					networkInterface["subnet_mask"] = subnetMask.String()
+					log.Printf("[DEBUG] ipv4 subnet %#v", subnetMask.String())
+					log.Printf("[DEBUG] ipv4 ip %#v", v.IpAddress[0])
+				 }
+				if testInput.To16() != nil {
+					m := net.CIDRMask(v.IpConfig.IpAddress[0].PrefixLength, 32)
+					log.Printf("[DEBUG] ipv6 cidr %#v", m)
+					//subnetMask := net.IPv6(m[0], m[1], m[2], m[3])
+					//networkInterface["subnet_mask"] = subnetMask.String()
+					//log.Printf("[DEBUG] %#v", subnetMask.String())
+					log.Printf("[DEBUG] ipv6 ip %#v", v.IpAddress[0])
+				 }
 			}
 			networkInterfaces = append(networkInterfaces, networkInterface)
 		}
@@ -425,10 +437,10 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 				return err
 			}
 			rootDatastore = msp.Name
-			log.Printf("[DEBUG] %#v", msp.Name)
+			log.Printf("[DEBUG] datastore %#v", msp.Name)
 		} else {
 			rootDatastore = md.Name
-			log.Printf("[DEBUG] %#v", md.Name)
+			log.Printf("[DEBUG] datastore %#v", md.Name)
 		}
 		break
 	}
@@ -453,10 +465,13 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 
 	// Initialize the connection info
 	if len(networkInterfaces) > 0 {
-		d.SetConnInfo(map[string]string{
-			"type": "ssh",
-			"host": networkInterfaces[0]["ip_address"].(string),
-		})
+		log.Printf("[DEBUG] network interface %v",networkInterfaces)
+			if networkInterfaces[0]["ip_address"] != nil {
+				d.SetConnInfo(map[string]string{
+						"type": "ssh",
+						"host": networkInterfaces[0]["ip_address"].(string),
+						})
+			}
 	}
 
 	return nil
