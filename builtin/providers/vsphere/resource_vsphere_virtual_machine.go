@@ -471,6 +471,14 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 		return nil
 	}
 
+	// Wait for the vm to get an IP address
+	ip, ipErr := vm.WaitForIP(context.TODO())
+
+	if ipErr != nil {
+		log.Printf("[ERROR] Could not get IP address for vm %s", d.Id())
+		return ipErr
+	}
+
 	var mvm mo.VirtualMachine
 
 	collector := property.DefaultCollector(client.Client)
