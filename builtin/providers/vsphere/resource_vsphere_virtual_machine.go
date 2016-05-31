@@ -477,7 +477,9 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 	finder := find.NewFinder(client.Client, true)
 	finder = finder.SetDatacenter(dc)
 
-	vm, err := finder.VirtualMachine(context.TODO(), vmPath(d.Get("folder").(string), d.Get("name").(string)))
+	name := d.Get("name").(string)
+
+	vm, err := finder.VirtualMachine(context.TODO(), vmPath(d.Get("folder").(string), name))
 	if err != nil {
 		return err
 	}
@@ -512,12 +514,97 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 			}
 		}
 		// Added disks
+		var resourcePool *object.ResourcePool
+		var folder *object.Folder
+
+		useSdrs := d.Get("use_sdrs").(bool)
+
+		// TODO this is kinda repeated code
+		if useSdrs {
+			var resourcePoolName string
+			var clusterName string
+			var folderName string
+			var datacenterName string
+
+			dcFolders, err := dc.Folders(context.TODO())
+			if err != nil {
+				return err
+			}
+
+			folder = dcFolders.VmFolder
+
+			if v, ok := d.GetOk("resource_pool"); ok {
+				resourcePoolName = v.(string)
+			}
+			if v, ok := d.GetOk("cluster"); ok {
+				clusterName = v.(string)
+			}
+			if v, ok := d.GetOk("folder"); ok {
+				folderName = v.(string)
+			}
+			if v, ok := d.GetOk("datacenter"); ok {
+				datacenterName = v.(string)
+			}
+
+			if resourcePoolName == "" {
+				if clusterName == "" {
+					resourcePool, err = finder.DefaultResourcePool(context.TODO())
+					if err != nil {
+						return err
+					}
+				} else {
+					resourcePool, err = finder.ResourcePool(context.TODO(), "*"+clusterName+"/Resources")
+					if err != nil {
+						return err
+					}
+				}
+			} else {
+				resourcePool, err = finder.ResourcePool(context.TODO(), resourcePoolName)
+				if err != nil {
+					return err
+				}
+			}
+
+			if folderName != "" {
+				si := object.NewSearchIndex(client.Client)
+				folderRef, err := si.FindByInventoryPath(
+					context.TODO(), fmt.Sprintf("%v/vm/%v", datacenterName, folderName))
+				if err != nil {
+					return fmt.Errorf("Error reading folder %s: %s", datacenterName, err)
+				} else if folderRef == nil {
+					return fmt.Errorf("Cannot find folder %s", folderName)
+				} else {
+					folder = folderRef.(*object.Folder)
+				}
+			}
+		}
+		log.Printf("[DEBUG] resource pool: %#v", resourcePool)
 		for _, diskRaw := range addedDisks.List() {
 			if disk, ok := diskRaw.(map[string]interface{}); ok {
 
-				// TODO use Storage Pod as well
+				// TODO this feels like it won't work, because of the spec
 				var datastore *object.Datastore
-				if disk["datastore"] == "" {
+				if useSdrs && disk["datastore"] != "" {
+					log.Printf("[DEBUG] starting findng recommended storage pod")
+
+					spd := StoragePodDataStore{
+						name:           name,
+						storagePodName: disk["datastore"].(string),
+						DataCenter:     dc,
+						ResourcePool:   resourcePool,
+						Folder:         folder,
+						VirtualMachine: vm,
+					}
+
+					log.Printf("[DEBUG] storage pod: %v", spd)
+					datastore, err = spd.findRecommendedStoragePodDataStore(client.Client)
+
+					if err != nil {
+						log.Printf("[ERROR] Unable to find drs datastore: %s", err)
+						return err
+					}
+
+				} else if disk["datastore"] == "" {
 					datastore, err = finder.DefaultDatastore(context.TODO())
 					if err != nil {
 						return fmt.Errorf("[ERROR] Update Remove Disk - Error finding datastore: %v", err)
@@ -1428,6 +1515,7 @@ func buildStoragePlacementSpecClone(c *govmomi.Client, f *object.DatacenterFolde
 }
 
 // findDatastore finds Datastore object.
+// TOOD - this is dup code
 func findDatastore(c *govmomi.Client, sps types.StoragePlacementSpec) (*object.Datastore, error) {
 	var datastore *object.Datastore
 	log.Printf("[DEBUG] findDatastore: StoragePlacementSpec: %#v\n", sps)
@@ -1638,6 +1726,7 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		log.Printf("[DEBUG] starting findng recommended storage pod")
 
 		spd := StoragePodDataStore{
+			clone:              true,
 			name:               vm.name,
 			template:           vm.template,
 			storagePodName:     vm.datastore,
@@ -1648,7 +1737,7 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 			VirtualMachine:     template,
 		}
 		log.Printf("[DEBUG] storage pod: %v", spd)
-		datastore, err = spd.findRecommenedStoragePodDataStore(c.Client)
+		datastore, err = spd.findRecommendedStoragePodDataStore(c.Client)
 
 		if err != nil {
 			log.Printf("[ERROR] Unable to find drs datastore: %s", err)

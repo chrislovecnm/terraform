@@ -15,6 +15,7 @@ type StoragePodDataStore struct {
 	name           string
 	template       string
 	storagePodName string
+	clone          bool
 
 	ConfigSpecsNetwork []types.BaseVirtualDeviceConfigSpec
 	ResourcePool       *object.ResourcePool
@@ -27,7 +28,7 @@ type StoragePodDataStore struct {
 
 // Based of of govc clone.go
 // Get the recommended StoragePod datastore
-func (spds *StoragePodDataStore) findRecommenedStoragePodDataStore(client *vim25.Client) (datastore *object.Datastore, err error) {
+func (spds *StoragePodDataStore) findRecommendedStoragePodDataStore(client *vim25.Client) (datastore *object.Datastore, err error) {
 	datastoreref := types.ManagedObjectReference{}
 
 	folderref := spds.Folder.Reference()
@@ -71,13 +72,22 @@ func (spds *StoragePodDataStore) findRecommenedStoragePodDataStore(client *vim25
 	vmref := spds.VirtualMachine.Reference()
 
 	// Build the placement spec
+
+	var sp string
+	if spds.clone {
+		sp = string(types.StoragePlacementSpecPlacementTypeClone)
+	} else {
+		sp = string(types.StoragePlacementSpecPlacementTypeReconfigure)
+	}
+
+	// TODO does this support update??
 	storagePlacementSpec := types.StoragePlacementSpec{
 		Folder:           &folderref,
 		Vm:               &vmref,
 		CloneName:        spds.name,
 		CloneSpec:        cloneSpec,
 		PodSelectionSpec: podSelectionSpec,
-		Type:             string(types.StoragePlacementSpecPlacementTypeClone),
+		Type:             sp,
 	}
 	log.Printf("[DEBUG] storage placement spec, %v", storagePlacementSpec)
 
