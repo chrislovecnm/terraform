@@ -402,6 +402,38 @@ func TestAccVSphereVirtualMachine_dhcp(t *testing.T) {
 	})
 }
 
+const testAccCheckVSphereVirtualMachineConfig_dhcp_drs = `
+resource "vsphere_virtual_machine" "foo" {
+    name = "terraform-test"
+    use_sdrs = true
+`
+
+func TestAccVSphereVirtualMachine_drs(t *testing.T) {
+	var vm virtualMachine
+	data := setupTemplateFuncDHCPData()
+	config := testAccCheckVSphereVirtualMachineConfig_dhcp_drs + data.parseDHCPTemplateConfigWithTemplate(testAccCheckVSphereTemplate_dhcp)
+
+	log.Printf("[DEBUG] template= %s", testAccCheckVSphereVirtualMachineConfig_dhcp_drs+testAccCheckVSphereTemplate_dhcp)
+	log.Printf("[DEBUG] template config= %s", config)
+	test_exists, test_name, test_cpu, test_mem, test_num_disk, test_num_of_nic, test_nic_label :=
+		TestFuncData{vm: vm, label: data.label}.testCheckFuncBasic()
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testBasicPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckVSphereVirtualMachineDestroy,
+		Steps: []resource.TestStep{
+			resource.TestStep{
+				Config: config,
+				Check: resource.ComposeTestCheckFunc(
+					test_exists, test_name, test_cpu, test_mem, test_num_disk, test_num_of_nic, test_nic_label,
+					// TODO how do I test that the ds is a storage pod?
+				),
+			},
+		},
+	})
+}
+
 const testAccCheckVSphereVirtualMachineConfig_custom_configs = `
 resource "vsphere_virtual_machine" "car" {
     name = "terraform-test-custom"
