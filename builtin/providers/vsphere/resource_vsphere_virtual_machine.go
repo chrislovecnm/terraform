@@ -12,7 +12,6 @@ import (
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
-	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
@@ -1636,18 +1635,23 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 	var datastore *object.Datastore
 	// Get Recommended StoragePod Datastore Reference
 	if vm.useSDRS && vm.template != "" {
+		log.Printf("[DEBUG] starting findng recommended storage pod")
 
-		datastore, err = storagePodDataStore{
+		spd := StoragePodDataStore{
 			name:               vm.name,
 			template:           vm.template,
+			storagePodName:     vm.datastore,
+			ConfigSpecsNetwork: networkDevices,
+			DataCenter:         dc,
 			ResourcePool:       resourcePool,
 			Folder:             folder,
 			VirtualMachine:     template,
-			ConfigSpecsNetwork: networkConfigs,
-		}.findRecommenedStoragePodDataStore(c)
+		}
+		log.Printf("[DEBUG] storage pod: %v", spd)
+		datastore, err = spd.findRecommenedStoragePodDataStore(c.Client)
 
 		if err != nil {
-			log.Printf("[ERROR] Unable to find datastore: %s", err)
+			log.Printf("[ERROR] Unable to find drs datastore: %s", err)
 			return err
 		}
 
@@ -1912,111 +1916,4 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		newVM.PowerOn(context.TODO())
 	}
 	return nil
-}
-
-type storagePodDataStore struct {
-	name           string
-	template       string
-	storagePodName string
-
-	ConfigSpecsNetwork []types.BaseVirtualDeviceConfigSpec
-	ResourcePool       *object.ResourcePool
-	// TODO what is this??
-	// HostSystem         *object.HostSystem
-	Folder         *object.Folder
-	VirtualMachine *object.VirtualMachine
-}
-
-// Based of of govc clone.go
-// Get the recommended StoragePod datastore
-func (pds *storagePodDataStore) findRecommenedStoragePodDataStore(client *vim25.Client) (datastore *object.Datastore, err error) {
-	datastoreref := types.ManagedObjectReference{}
-
-	folderref := pds.Folder.Reference()
-	poolref := pds.ResourcePool.Reference()
-
-	relocateSpec := types.VirtualMachineRelocateSpec{
-		DeviceChange: pds.ConfigSpecsNetwork,
-		Folder:       &folderref,
-		Pool:         &poolref,
-	}
-
-	// TODO what is this?
-	// if pds.HostSystem != nil {
-	// 	hostref := pds.HostSystem.Reference()
-	// 	relocateSpec.Host = &hostref
-	// }
-
-	cloneSpec := &types.VirtualMachineCloneSpec{
-		Location: relocateSpec,
-		PowerOn:  false,
-		Template: pds.template,
-	}
-
-	sp, err := pds.findStoragePod(client)
-	if err != nil {
-		return nil, err
-	}
-	storagePod := sp.Reference()
-
-	// Build pod selection spec from config spec
-	podSelectionSpec := types.StorageDrsPodSelectionSpec{
-		StoragePod: &storagePod,
-	}
-
-	// Get the virtual machine reference
-	vmref := pds.VirtualMachine.Reference()
-
-	// Build the placement spec
-	storagePlacementSpec := types.StoragePlacementSpec{
-		Folder:           &folderref,
-		Vm:               &vmref,
-		CloneName:        pds.name,
-		CloneSpec:        cloneSpec,
-		PodSelectionSpec: podSelectionSpec,
-		Type:             string(types.StoragePlacementSpecPlacementTypeClone),
-	}
-
-	// Get the storage placement result
-	storageResourceManager := object.NewStorageResourceManager(client)
-	result, err := storageResourceManager.RecommendDatastores(context.TODO(), storagePlacementSpec)
-	if err != nil {
-		log.Printf("[ERROR] Couldn't find datastore cluster %v.  %s", pds.storagePodName, err)
-		return nil, err
-	}
-
-	// Get the recommendations
-	recommendations := result.Recommendations
-	if len(recommendations) == 0 {
-		log.Printf("[ERROR] no recommendations for datastore")
-		return nil, fmt.Errorf("no recommendations for datastore")
-	}
-
-	// Get the first recommendation
-	datastoreref = recommendations[0].Action[0].(*types.StoragePlacementAction).Destination
-
-	log.Printf("[DEBUG] Found datastore: %v", datastoreref)
-	return &datastoreref, nil
-}
-
-// find the Default or named Storage Pod
-func (pds *storagePodDataStore) findStoragePod(client *vim25.Client) (sp *object.StoragePod, err error) {
-
-	var sp *object.StoragePod
-	var err error
-	finder := find.NewFinder(client, true)
-
-	if pds.storagePodName != "" {
-		sp, err = finder.DatastoreCluster(context.TODO(), pds.storagePodName)
-	} else {
-		sp, err = finder.DefaultDatastoreCluster(context.TODO())
-	}
-
-	if err != nil {
-		log.Printf("[ERROR] Couldn't find datastore cluster %v.  %s", pds.storagePodName, err)
-		return nil, err
-	}
-
-	log.Printf("[DEBUG] Found datastore cluster: %v", sp)
-	return sp, nil
 }
