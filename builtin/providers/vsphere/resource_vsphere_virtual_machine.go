@@ -909,6 +909,7 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 				}
 
 				if vVmdk, ok := disk["vmdk"].(string); ok && vVmdk != "" {
+					// FIXME this should be tested in schema, before we get here
 					if v, ok := disk["template"].(string); ok && v != "" {
 						return fmt.Errorf("Cannot specify a vmdk for a template")
 					}
@@ -1429,111 +1430,6 @@ func buildVMRelocateSpec(rp *object.ResourcePool, ds *object.Datastore, vm *obje
 	}, nil
 }
 
-// getDatastoreObject gets datastore object.
-func getDatastoreObject(client *govmomi.Client, f *object.DatacenterFolders, name string) (types.ManagedObjectReference, error) {
-	s := object.NewSearchIndex(client.Client)
-	ref, err := s.FindChild(context.TODO(), f.DatastoreFolder, name)
-	if err != nil {
-		return types.ManagedObjectReference{}, err
-	}
-	if ref == nil {
-		return types.ManagedObjectReference{}, fmt.Errorf("Datastore '%s' not found.", name)
-	}
-	log.Printf("[DEBUG] getDatastoreObject: reference: %#v", ref)
-	return ref.Reference(), nil
-}
-
-// buildStoragePlacementSpecCreate builds StoragePlacementSpec for create action.
-func buildStoragePlacementSpecCreate(f *object.DatacenterFolders, rp *object.ResourcePool, storagePod object.StoragePod, configSpec types.VirtualMachineConfigSpec) types.StoragePlacementSpec {
-	vmfr := f.VmFolder.Reference()
-	rpr := rp.Reference()
-	spr := storagePod.Reference()
-
-	sps := types.StoragePlacementSpec{
-		Type:       "create",
-		ConfigSpec: &configSpec,
-		PodSelectionSpec: types.StorageDrsPodSelectionSpec{
-			StoragePod: &spr,
-		},
-		Folder:       &vmfr,
-		ResourcePool: &rpr,
-	}
-	log.Printf("[DEBUG] findDatastore: StoragePlacementSpec: %#v\n", sps)
-	return sps
-}
-
-// buildStoragePlacementSpecClone builds StoragePlacementSpec for clone action.
-func buildStoragePlacementSpecClone(c *govmomi.Client, f *object.DatacenterFolders, vm *object.VirtualMachine, rp *object.ResourcePool, storagePod object.StoragePod) types.StoragePlacementSpec {
-	vmr := vm.Reference()
-	vmfr := f.VmFolder.Reference()
-	rpr := rp.Reference()
-	spr := storagePod.Reference()
-
-	var o mo.VirtualMachine
-	err := vm.Properties(context.TODO(), vmr, []string{"datastore"}, &o)
-	if err != nil {
-		return types.StoragePlacementSpec{}
-	}
-	ds := object.NewDatastore(c.Client, o.Datastore[0])
-	log.Printf("[DEBUG] findDatastore: datastore: %#v\n", ds)
-
-	devices, err := vm.Device(context.TODO())
-	if err != nil {
-		return types.StoragePlacementSpec{}
-	}
-
-	var key int32
-	for _, d := range devices.SelectByType((*types.VirtualDisk)(nil)) {
-		key = int32(d.GetVirtualDevice().Key)
-		log.Printf("[DEBUG] findDatastore: virtual devices: %#v\n", d.GetVirtualDevice())
-	}
-
-	sps := types.StoragePlacementSpec{
-		Type: "clone",
-		Vm:   &vmr,
-		PodSelectionSpec: types.StorageDrsPodSelectionSpec{
-			StoragePod: &spr,
-		},
-		CloneSpec: &types.VirtualMachineCloneSpec{
-			Location: types.VirtualMachineRelocateSpec{
-				Disk: []types.VirtualMachineRelocateSpecDiskLocator{
-					{
-						Datastore:       ds.Reference(),
-						DiskBackingInfo: &types.VirtualDiskFlatVer2BackingInfo{},
-						DiskId:          key,
-					},
-				},
-				Pool: &rpr,
-			},
-			PowerOn:  false,
-			Template: false,
-		},
-		CloneName: "dummy",
-		Folder:    &vmfr,
-	}
-	return sps
-}
-
-// findDatastore finds Datastore object.
-// TOOD - this is dup code
-func findDatastore(c *govmomi.Client, sps types.StoragePlacementSpec) (*object.Datastore, error) {
-	var datastore *object.Datastore
-	log.Printf("[DEBUG] findDatastore: StoragePlacementSpec: %#v\n", sps)
-
-	srm := object.NewStorageResourceManager(c.Client)
-	rds, err := srm.RecommendDatastores(context.TODO(), sps)
-	if err != nil {
-		return nil, err
-	}
-	log.Printf("[DEBUG] findDatastore: recommendDatastores: %#v\n", rds)
-
-	spa := rds.Recommendations[0].Action[0].(*types.StoragePlacementAction)
-	datastore = object.NewDatastore(c.Client, spa.Destination)
-	log.Printf("[DEBUG] findDatastore: datastore: %#v", datastore)
-
-	return datastore, nil
-}
-
 // createCdroms is a helper function to attach virtual cdrom devices (and their attached disk images) to a virtual IDE controller.
 func createCdroms(vm *object.VirtualMachine, cdroms []cdrom) error {
 	log.Printf("[DEBUG] add cdroms: %v", cdroms)
@@ -1722,7 +1618,7 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 
 	var datastore *object.Datastore
 	// Get Recommended StoragePod Datastore Reference
-	if vm.useSDRS && vm.template != "" {
+	if vm.useSDRS {
 		log.Printf("[DEBUG] starting findng recommended storage pod")
 
 		spd := StoragePodDataStore{
@@ -1737,50 +1633,31 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 			VirtualMachine:     template,
 		}
 		log.Printf("[DEBUG] storage pod: %v", spd)
-		datastore, err = spd.findRecommendedStoragePodDataStore(c.Client)
-
-		if err != nil {
-			log.Printf("[ERROR] Unable to find drs datastore: %s", err)
-			return err
+		if vm.template != "" {
+			datastore, err = spd.findRecommendedStoragePodDataStore(c.Client)
+			if err != nil {
+				log.Printf("[ERROR] Unable to find drs datastore: %s", err)
+				return err
+			}
+		} else {
+			datastore, err = spd.findDataStoreSpecCreate(c.Client, configSpec)
+			if err != nil {
+				log.Printf("[ERROR] Unable to find dsrs spec create datastore: %s", err)
+				return err
+			}
 		}
 
-	} else if vm.datastore == "" { // Get Default DS
+	} else if vm.datastore != "" { // Get Named DS
+		datastore, err = finder.Datastore(context.TODO(), vm.datastore)
+		if err != nil {
+			log.Printf("[ERROR] Unable to find datastore: %s, %s", vm.datastore, err)
+			return err
+		}
+	} else { // Get Default DS
 		datastore, err = finder.DefaultDatastore(context.TODO())
 		if err != nil {
 			log.Printf("[ERROR] Unable to find default datastore: %s", err)
 			return err
-		}
-	} else {
-		// TODO does this work with StoragePods?
-		// This is kinda a mess refactor??
-		datastore, err = finder.Datastore(context.TODO(), vm.datastore)
-		if err != nil {
-			d, err := getDatastoreObject(c, dcFolders, vm.datastore)
-			if err != nil {
-				log.Printf("[ERROR] Unable to find datastore: %s", err)
-				return err
-			}
-
-			if d.Type == "StoragePod" {
-				sp := object.StoragePod{
-					Folder: object.NewFolder(c.Client, d),
-				}
-
-				var sps types.StoragePlacementSpec
-				if vm.template != "" {
-					sps = buildStoragePlacementSpecClone(c, dcFolders, template, resourcePool, sp)
-				} else {
-					sps = buildStoragePlacementSpecCreate(dcFolders, resourcePool, sp, configSpec)
-				}
-
-				datastore, err = findDatastore(c, sps)
-				if err != nil {
-					log.Printf("[ERROR] Unable to find datastore: %s", err)
-					return err
-				}
-			} else {
-				datastore = object.NewDatastore(c.Client, d)
-			}
 		}
 	}
 

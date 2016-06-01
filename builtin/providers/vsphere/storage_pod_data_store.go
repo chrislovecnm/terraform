@@ -7,6 +7,7 @@ import (
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25"
+	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
 )
@@ -24,12 +25,12 @@ type StoragePodDataStore struct {
 	Folder         *object.Folder
 	VirtualMachine *object.VirtualMachine
 	DataCenter     *object.Datacenter
+	StoragePod     *object.StoragePod
 }
 
 // Based of of govc clone.go
 // Get the recommended StoragePod datastore
 func (spds *StoragePodDataStore) findRecommendedStoragePodDataStore(client *vim25.Client) (datastore *object.Datastore, err error) {
-	datastoreref := types.ManagedObjectReference{}
 
 	folderref := spds.Folder.Reference()
 	poolref := spds.ResourcePool.Reference()
@@ -73,11 +74,11 @@ func (spds *StoragePodDataStore) findRecommendedStoragePodDataStore(client *vim2
 
 	// Build the placement spec
 
-	var sp string
+	var spec string
 	if spds.clone {
-		sp = string(types.StoragePlacementSpecPlacementTypeClone)
+		spec = string(types.StoragePlacementSpecPlacementTypeClone)
 	} else {
-		sp = string(types.StoragePlacementSpecPlacementTypeReconfigure)
+		spec = string(types.StoragePlacementSpecPlacementTypeReconfigure)
 	}
 
 	// TODO does this support update??
@@ -87,30 +88,38 @@ func (spds *StoragePodDataStore) findRecommendedStoragePodDataStore(client *vim2
 		CloneName:        spds.name,
 		CloneSpec:        cloneSpec,
 		PodSelectionSpec: podSelectionSpec,
-		Type:             sp,
+		Type:             spec,
 	}
 	log.Printf("[DEBUG] storage placement spec, %v", storagePlacementSpec)
 
-	// Get the storage placement result
-	storageResourceManager := object.NewStorageResourceManager(client)
-	var result *types.StoragePlacementResult
-	result, err = storageResourceManager.RecommendDatastores(context.TODO(), storagePlacementSpec)
+	datastore = spds.findRecommendedDatastore(client, storagePlacementSpec)
+	log.Printf("[DEBUG] Found datastore: %v", datastore)
+	return datastore, nil
+}
+
+func (spds *StoragePodDataStore) findRecommendedDatastore(client *vim25.Client, sps types.StoragePlacementSpec) (*object.Datastore, error) {
+
+	var datastore *object.Datastore
+	log.Printf("[DEBUG] findDatastore: StoragePlacementSpec: %#v\n", sps)
+
+	srm := object.NewStorageResourceManager(client)
+	rds, err := srm.RecommendDatastores(context.TODO(), sps)
 	if err != nil {
-		log.Printf("[ERROR] Couldn't find datastore cluster %v.  %s", spds.storagePodName, err)
 		return nil, err
 	}
+	log.Printf("[DEBUG] findDatastore: recommendDatastores: %#v\n", rds)
 
 	// Get the recommendations
-	recommendations := result.Recommendations
+	recommendations := rds.Recommendations
 	if len(recommendations) == 0 {
 		log.Printf("[ERROR] no recommendations for datastore")
 		return nil, fmt.Errorf("no recommendations for datastore")
 	}
 
-	// Get the first recommendation
-	datastoreref = recommendations[0].Action[0].(*types.StoragePlacementAction).Destination
-	datastore = object.NewDatastore(client, datastoreref)
-	log.Printf("[DEBUG] Found datastore: %v", datastore)
+	spa := rds.Recommendations[0].Action[0].(*types.StoragePlacementAction)
+	datastore = object.NewDatastore(client, spa.Destination)
+	log.Printf("[DEBUG] findDatastore: datastore: %#v", datastore)
+
 	return datastore, nil
 }
 
@@ -137,4 +146,84 @@ func (spds *StoragePodDataStore) findStoragePod(client *vim25.Client) (sp *objec
 
 	log.Printf("[DEBUG] Found datastore cluster: %v", sp)
 	return sp, nil
+}
+
+// Not actually used.  Holding on to the code
+func (spds *StoragePodDataStore) buildStoragePlacementSpecClone(c *vim25.Client) types.StoragePlacementSpec {
+	vmr := spds.VirtualMachine.Reference()
+	vmfr := spds.Folder.Reference()
+	rpr := spds.ResourcePool.Reference()
+	spr := spds.StoragePod.Reference()
+
+	var o mo.VirtualMachine
+	err := spds.VirtualMachine.Properties(context.TODO(), vmr, []string{"datastore"}, &o)
+	if err != nil {
+		return types.StoragePlacementSpec{}
+	}
+	ds := object.NewDatastore(c, o.Datastore[0])
+	log.Printf("[DEBUG] findDatastore: datastore: %#v\n", ds)
+
+	devices, err := spds.VirtualMachine.Device(context.TODO())
+	if err != nil {
+		return types.StoragePlacementSpec{}
+	}
+
+	var key int32
+	for _, d := range devices.SelectByType((*types.VirtualDisk)(nil)) {
+		key = int32(d.GetVirtualDevice().Key)
+		log.Printf("[DEBUG] findDatastore: virtual devices: %#v\n", d.GetVirtualDevice())
+	}
+
+	sps := types.StoragePlacementSpec{
+		Type: "clone",
+		Vm:   &vmr,
+		PodSelectionSpec: types.StorageDrsPodSelectionSpec{
+			StoragePod: &spr,
+		},
+		CloneSpec: &types.VirtualMachineCloneSpec{
+			Location: types.VirtualMachineRelocateSpec{
+				Disk: []types.VirtualMachineRelocateSpecDiskLocator{
+					{
+						Datastore:       ds.Reference(),
+						DiskBackingInfo: &types.VirtualDiskFlatVer2BackingInfo{},
+						DiskId:          key,
+					},
+				},
+				Pool: &rpr,
+			},
+			PowerOn:  false,
+			Template: false,
+		},
+		CloneName: "dummy",
+		Folder:    &vmfr,
+	}
+	return sps
+}
+
+// buildStoragePlacementSpecCreate builds StoragePlacementSpec for create action.
+func (spds *StoragePodDataStore) findDataStoreSpecCreate(c *vim25.Client, configSpec types.VirtualMachineConfigSpec) (*object.Datastore, error) {
+	var err error
+
+	spds.StoragePod, err = spds.findStoragePod(c)
+	if err != nil {
+		log.Printf("[ERROR] Couldn't find datastore cluster %v.  %s", spds.storagePodName, err)
+		return nil, err
+	}
+
+	vmfr := spds.Folder.Reference()
+	rpr := spds.ResourcePool.Reference()
+	spr := spds.StoragePod.Reference()
+
+	sps := types.StoragePlacementSpec{
+		Type:       "create",
+		ConfigSpec: &configSpec,
+		PodSelectionSpec: types.StorageDrsPodSelectionSpec{
+			StoragePod: &spr,
+		},
+		Folder:       &vmfr,
+		ResourcePool: &rpr,
+	}
+
+	log.Printf("[DEBUG] findDatastore: StoragePlacementSpec: %#v\n", sps)
+	return spds.findRecommendedDatastore(c, sps)
 }
