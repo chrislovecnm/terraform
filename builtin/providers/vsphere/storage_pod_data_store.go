@@ -92,7 +92,11 @@ func (spds *StoragePodDataStore) findRecommendedStoragePodDataStore(client *vim2
 	}
 	log.Printf("[DEBUG] storage placement spec, %v", storagePlacementSpec)
 
-	datastore = spds.findRecommendedDatastore(client, storagePlacementSpec)
+	datastore, err = spds.findRecommendedDatastore(client, storagePlacementSpec)
+	if err != nil {
+		log.Printf("[ERROR] Couldn't find datastore %s", err)
+		return nil, err
+	}
 	log.Printf("[DEBUG] Found datastore: %v", datastore)
 	return datastore, nil
 }
@@ -201,10 +205,10 @@ func (spds *StoragePodDataStore) buildStoragePlacementSpecClone(c *vim25.Client)
 }
 
 // buildStoragePlacementSpecCreate builds StoragePlacementSpec for create action.
-func (spds *StoragePodDataStore) findDataStoreSpecCreate(c *vim25.Client, configSpec types.VirtualMachineConfigSpec) (*object.Datastore, error) {
-	var err error
+func (spds *StoragePodDataStore) findDataStoreSpecCreate(c *vim25.Client, configSpec types.VirtualMachineConfigSpec) (datastore *object.Datastore, err error) {
 
 	spds.StoragePod, err = spds.findStoragePod(c)
+
 	if err != nil {
 		log.Printf("[ERROR] Couldn't find datastore cluster %v.  %s", spds.storagePodName, err)
 		return nil, err
@@ -225,5 +229,10 @@ func (spds *StoragePodDataStore) findDataStoreSpecCreate(c *vim25.Client, config
 	}
 
 	log.Printf("[DEBUG] findDatastore: StoragePlacementSpec: %#v\n", sps)
-	return spds.findRecommendedDatastore(c, sps)
+	datastore, err = spds.findRecommendedDatastore(c, sps)
+	if err != nil {
+		log.Printf("[ERROR] Couldn't find datastore %s", err)
+		return nil, err
+	}
+	return datastore, nil
 }
