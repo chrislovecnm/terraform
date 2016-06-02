@@ -1077,23 +1077,28 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 			networkInterface := make(map[string]interface{})
 			networkInterface["label"] = v.Network
 			networkInterface["mac_address"] = v.MacAddress
-			for _, ip := range v.IpConfig.IpAddress {
-				p := net.ParseIP(ip.IpAddress)
-				if p.To4() != nil {
-					log.Printf("[DEBUG] p.String - %#v", p.String())
-					log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
-					networkInterface["ipv4_address"] = p.String()
-					networkInterface["ipv4_prefix_length"] = ip.PrefixLength
-				} else if p.To16() != nil {
-					log.Printf("[DEBUG] p.String - %#v", p.String())
-					log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
-					networkInterface["ipv6_address"] = p.String()
-					networkInterface["ipv6_prefix_length"] = ip.PrefixLength
+			// Fixing https://github.com/hashicorp/terraform/issues/5945
+			if v.IpConfig != nil && v.IpConfig.IpAddress != nil {
+				for _, ip := range v.IpConfig.IpAddress {
+					if ip.IpAddress != nil {
+						p := net.ParseIP(ip.IpAddress)
+						if p.To4() != nil {
+							log.Printf("[DEBUG] p.String - %#v", p.String())
+							log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
+							networkInterface["ipv4_address"] = p.String()
+							networkInterface["ipv4_prefix_length"] = ip.PrefixLength
+						} else if p.To16() != nil {
+							log.Printf("[DEBUG] p.String - %#v", p.String())
+							log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
+							networkInterface["ipv6_address"] = p.String()
+							networkInterface["ipv6_prefix_length"] = ip.PrefixLength
+						}
+						log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
+					}
 				}
 				log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
+				networkInterfaces = append(networkInterfaces, networkInterface)
 			}
-			log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
-			networkInterfaces = append(networkInterfaces, networkInterface)
 		}
 	}
 	if mvm.Guest.IpStack != nil {
@@ -1127,11 +1132,21 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 		return fmt.Errorf("Invalid network interfaces to set: %#v", networkInterfaces)
 	}
 
-	log.Printf("[DEBUG] ip address: %v", networkInterfaces[0]["ipv4_address"].(string))
-	d.SetConnInfo(map[string]string{
-		"type": "ssh",
-		"host": networkInterfaces[0]["ipv4_address"].(string),
-	})
+	// FIXING https://github.com/hashicorp/terraform/issues/4302
+	if networkInterfaces[0] != nil {
+		if networkInterfaces[0]["ipv4_address"] != nil && networkInterfaces[0]["ipv4_address"].(string) != "" {
+			d.SetConnInfo(map[string]string{
+				"type": "ssh",
+				"host": networkInterfaces[0]["ipv4_address"].(string),
+			})
+		} else if networkInterfaces[0]["ipv6_address"] != nil && networkInterfaces[0]["ipv6_address"].(string) != "" {
+			d.SetConnInfo(map[string]string{
+				"type": "ssh",
+				"host": networkInterfaces[0]["ipv6_address"].(string),
+			})
+
+		}
+	}
 
 	var rootDatastore string
 	for _, v := range mvm.Datastore {
