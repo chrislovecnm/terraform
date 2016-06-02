@@ -1103,6 +1103,7 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 	}
 	if mvm.Guest.IpStack != nil {
 		for _, v := range mvm.Guest.IpStack {
+
 			if v.IpRouteConfig != nil && v.IpRouteConfig.IpRoute != nil {
 				for _, route := range v.IpRouteConfig.IpRoute {
 					if route.Gateway.Device != "" {
